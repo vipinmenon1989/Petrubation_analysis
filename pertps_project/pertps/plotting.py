@@ -2,6 +2,28 @@ import scanpy as sc
 import matplotlib.pyplot as plt
 import os
 import numpy as np
+import pandas as pd
+
+
+def knockdown_fraction(frame, h_thresh, v_thresh=0.5, expression_col="Expression",
+                       score_col="PS_Score"):
+    """Percentage of cells in the successful-knockdown quadrant.
+
+    A cell counts when its expression is at or below ``h_thresh`` *and* its
+    perturbation score is at or above ``v_thresh``. Expression is on the same
+    log-normalized scale as ``adata.X``; the score is the normalized PS score
+    in ``[0, 1]``.
+
+    Both columns are read from a single frame on purpose. Taking them from two
+    frames lets pandas align the ``&`` on the union of two different indexes,
+    which silently divides a sample-sized numerator by a population-sized
+    denominator. Returns NaN for an empty frame.
+    """
+    if len(frame) == 0:
+        return float("nan")
+    hit = (frame[expression_col] <= h_thresh) & (frame[score_col] >= v_thresh)
+    return float(hit.mean() * 100)
+
 
 def plot_ps_on_lda(adata, gene_list, output_dir="plots_fixed_lda", neg_ctrl="Non-Targeting", basis="X_lda_umap"):
     """

@@ -3,6 +3,7 @@ import scanpy as sc
 import pandas as pd
 import numpy as np
 from pertps import PerturbAnalyzer, plot_ps_on_lda, plot_global_summary
+from pertps.plotting import knockdown_fraction
 from pertps.barcodes import AMBIGUOUS_LABEL, UNASSIGNED_LABEL, load_barcode_table
 from tqdm import tqdm
 import matplotlib.pyplot as plt
@@ -198,22 +199,22 @@ for target_gene in tqdm(gene_list, desc="Generating Labeled Scatters"):
     # exactly 0 for most genes and the cut degenerates into "expression is
     # exactly zero" with the dashed line drawn on the axis. Across the demo the
     # two give the same net signal to within ~0.1 percentage points.
-    full_ctrl = plot_df[plot_df['Group'] == negative_ctrl]['Expression']
+    # full_ctrl_df is the whole control population; df_ctrl above has been
+    # downsampled to 2,000 rows for plotting. The cut and the baseline are both
+    # statistics of the population, so they must come from this frame, not the
+    # sample used to draw the grey points.
+    full_ctrl_df = plot_df[plot_df['Group'] == negative_ctrl]
     if EXPRESSION_CUT == "median":
-        h_thresh = full_ctrl.median()
+        h_thresh = full_ctrl_df['Expression'].median()
     else:
-        h_thresh = full_ctrl.mean()
+        h_thresh = full_ctrl_df['Expression'].mean()
     v_thresh = 0.5
 
     # Applying the same classification to control cells says what the knockdown
     # percentage actually means: "66% knocked down" reads very differently next
     # to a 0% control rate than next to a 16% one.
-    ctrl_kd = float(
-        ((full_ctrl <= h_thresh) & (df_ctrl['PS_Score'] >= v_thresh)).mean() * 100
-    ) if len(full_ctrl) else float('nan')
-    tgt_kd = float(
-        ((df_target['Expression'] <= h_thresh) & (df_target['PS_Score'] >= v_thresh)).mean() * 100
-    )
+    ctrl_kd = knockdown_fraction(full_ctrl_df, h_thresh, v_thresh)
+    tgt_kd = knockdown_fraction(df_target, h_thresh, v_thresh)
 
     plt.axvline(x=v_thresh, color='black', linestyle='--', alpha=0.5)
     plt.axhline(y=h_thresh, color='black', linestyle='--', alpha=0.5)

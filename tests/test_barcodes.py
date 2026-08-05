@@ -16,6 +16,7 @@ from pertps.barcodes import (
     assign_guides,
     parse_target_gene,
 )
+from pertps.plotting import knockdown_fraction
 
 
 class TestParseTargetGene:
@@ -112,3 +113,65 @@ class TestExpressionCut:
         control = pd.Series([0.0] * 60 + [1.0, 2.0, 3.0] * 10)
         assert np.median(control) == 0.0
         assert control.mean() > 0.0
+
+
+class TestKnockdownFraction:
+    """The control baseline printed in each scatter title.
+
+    The scatter downsamples the grey control cloud to 2,000 points. The
+    baseline is a statistic of the whole control population, so it must be
+    computed on the population -- mixing the two is the bug this guards.
+    """
+
+    @staticmethod
+    def _controls(n=10000, seed=0):
+        rng = np.random.default_rng(seed)
+        return pd.DataFrame({
+            "Expression": rng.random(n),
+            "PS_Score": rng.random(n),
+        })
+
+    def test_matches_a_hand_counted_frame(self):
+        frame = pd.DataFrame({
+            "Expression": [0.0, 0.0, 1.0, 1.0],
+            "PS_Score": [0.9, 0.1, 0.9, 0.1],
+        })
+        # Only row 0 is both low-expression and high-score.
+        assert knockdown_fraction(frame, h_thresh=0.5, v_thresh=0.5) == 25.0
+
+    def test_empty_frame_is_nan(self):
+        empty = pd.DataFrame({"Expression": [], "PS_Score": []})
+        assert np.isnan(knockdown_fraction(empty, h_thresh=0.5))
+
+    def test_is_invariant_to_the_plotting_downsample(self):
+        """Regression guard: the baseline must not depend on the 2,000-cell cap.
+
+        The original form took Expression from the full population and PS_Score
+        from the downsampled frame. Pandas aligns ``&`` on the union of the two
+        indexes, so only sampled rows could be True while the denominator
+        stayed population-sized -- deflating every baseline by 2000/n_control,
+        toward the 0% that the baseline exists to distinguish from.
+        """
+        controls = self._controls()
+        h_thresh = controls["Expression"].mean()
+
+        full = knockdown_fraction(controls, h_thresh, v_thresh=0.5)
+        sampled = knockdown_fraction(
+            controls.sample(n=2000, random_state=42), h_thresh, v_thresh=0.5
+        )
+        assert full == pytest.approx(sampled, abs=2.0), (
+            "baseline should not shift when the control cloud is downsampled"
+        )
+
+        # And the shape of the old bug, so this test fails if it comes back.
+        downsampled = controls.sample(n=2000, random_state=42)
+        mixed = float(
+            (
+                (controls["Expression"] <= h_thresh)
+                & (downsampled["PS_Score"] >= 0.5)
+            ).mean() * 100
+        )
+        assert mixed < full / 2, (
+            f"expected the mixed-index form to be badly deflated, "
+            f"got {mixed:.1f} vs {full:.1f}"
+        )
