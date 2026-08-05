@@ -11,6 +11,7 @@ setup(
         "scipy",
         "statsmodels",
         "scikit-learn",
+        "umap-learn",
         "matplotlib",
         "tqdm"
     ],
