@@ -1,3 +1,5 @@
+import logging
+
 import numpy as np
 import pandas as pd
 import scanpy as sc
@@ -5,13 +7,15 @@ from scipy.optimize import minimize
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 import umap
 
+logger = logging.getLogger(__name__)
+
 class PerturbAnalyzer:
     def __init__(self, adata, neg_ctrl="Non-Targeting", scale_factor=3.0):
         self.adata = adata
         self.neg_ctrl = neg_ctrl
         self.scale_factor = scale_factor
 
-    def calculate_ps_score(self, target_gene, top_n=100):
+    def calculate_ps_score(self, target_gene, top_n=100, min_pct_expressing_control=1.0):
         """
         OPTIMIZED: Vectorized Analytic Solution.
         Replaces numerical optimization loop with exact linear projection.
@@ -29,14 +33,35 @@ class PerturbAnalyzer:
         if subset.n_obs < 10:
             return None
 
+        # A gene the controls do not express cannot be shown to be knocked
+        # down: with a control median of zero every cell lands on the "low
+        # expression" side of the quadrant split, so any high score is read as
+        # a successful knockdown. Before this check the olfactory-receptor
+        # controls topped the efficiency ranking (OR2D3 at 51%).
+        if min_pct_expressing_control is not None and target_gene in subset.var_names:
+            ctrl = subset[subset.obs['gene'] == self.neg_ctrl, target_gene].X
+            ctrl = ctrl.toarray() if hasattr(ctrl, "toarray") else np.asarray(ctrl)
+            pct = 100.0 * float(np.mean(np.asarray(ctrl).ravel() > 0))
+            if pct < min_pct_expressing_control:
+                logger.warning(
+                    "Skipping %s: expressed in only %.2f%% of control cells, so a "
+                    "knockdown cannot be measured.", target_gene, pct,
+                )
+                return None
+
         # 2. Feature Selection (Identify top changing genes)
         # Using t-test (closest to R's simple diff logic)
         try:
             sc.tl.rank_genes_groups(subset, groupby='gene', reference=self.neg_ctrl, method='t-test')
             # Extract top_n gene names
             target_biomarkers = pd.DataFrame(subset.uns['rank_genes_groups']['names'])[target_gene].head(top_n).tolist()
-        except:
-            # Fallback if rank_genes_groups fails (e.g. too few cells)
+        except Exception as exc:
+            # A bare 'except' here also swallows KeyboardInterrupt and hides why
+            # a target failed, which makes a 50-gene batch impossible to debug.
+            logger.warning(
+                "Skipping %s: ranking genes failed (%s: %s)",
+                target_gene, type(exc).__name__, exc,
+            )
             return None
 
         # 3. Prepare Matrices

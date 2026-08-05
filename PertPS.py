@@ -3,6 +3,8 @@ import scanpy as sc
 import pandas as pd
 import numpy as np
 from pertps import PerturbAnalyzer, plot_ps_on_lda, plot_global_summary
+from pertps.plotting import knockdown_fraction
+from pertps.barcodes import AMBIGUOUS_LABEL, UNASSIGNED_LABEL, load_barcode_table
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -15,6 +17,19 @@ h5ad_filepath    = "./demo/PertTF_Subset_100MB.h5ad"
 output_h5ad_path = "./demo/PertTF_Subset_PS_Scores.h5ad"
 barcode_filepath = "./demo/BARCODE_10x_Merged.txt"
 negative_ctrl    = "Non-Targeting"
+
+# Guide-calling thresholds. A cell is assigned to its top guide only when that
+# guide has at least MIN_UMI counts and beats the runner-up by DOMINANCE_RATIO;
+# otherwise it is Ambiguous. Keep these in step with perturbseq-pipeline so the
+# two give the same per-cell answer.
+MIN_UMI          = 3
+DOMINANCE_RATIO  = 2.0
+
+# Horizontal cut of the quadrant plot, placed inside the control population.
+# "mean" rather than "median": single-cell counts are zero-inflated and the
+# control median is exactly 0 for most genes, which collapses "low expression"
+# into "expression is exactly zero".
+EXPRESSION_CUT   = "mean"   # mean | median
 
 gene_list = [
     "SMARCC1", "TCF7L2", "HMGA2", "AFF4", "HIF1A", "TCF7L1", "SMARCA4", "CTNNB1", 
@@ -42,23 +57,27 @@ if not adata.obs_names.is_unique:
     adata.obs_names_make_unique()
 
 print("Loading Barcode Table...")
-bc_frame = pd.read_csv(barcode_filepath, sep="\t")
-bc_frame.columns = bc_frame.columns.str.lower()
+# load_barcode_table re-derives the target from the sgrna name (so CD81.2 maps
+# to CD81 rather than becoming its own target) and resolves cells carrying
+# several guides with the dominance rule instead of keeping whichever row came
+# last, which assigned a guide at random for roughly a quarter of cells.
+labels = load_barcode_table(
+    barcode_filepath,
+    strip_prefix=True,
+    min_umi=MIN_UMI,
+    dominance_ratio=DOMINANCE_RATIO,
+)
+adata.obs['gene'] = adata.obs_names.map(labels.to_dict()).fillna('Other')
 
-# --- CRITICAL FIX 2: Universal Prefix Stripping ---
-# This handles S1L1_, S1L2_, S2L1_, S2L2_ all at once.
-print("Stripping library prefixes (S1L1_, S2L2_, etc.)...")
-bc_frame['cell'] = bc_frame['cell'].str.split('_').str[-1]
-
-# --- SAFETY CHECK: Verify Barcodes Look Clean ---
-print("\n--- BARCODE VERIFICATION (Top 5) ---")
-print("These should look like 'AAAC...-1' without any S1/S2 prefixes:")
-print(bc_frame['cell'].head().tolist())
-print("------------------------------------\n")
-
-# Map barcodes to adata.obs['gene']
-barcode_map = bc_frame.set_index('cell')['gene'].to_dict()
-adata.obs['gene'] = adata.obs_names.map(barcode_map).fillna('Other')
+# Ambiguous and unassigned cells belong to neither the target nor the control
+# group; leaving them in either would blur both.
+n_amb = int((adata.obs['gene'] == AMBIGUOUS_LABEL).sum())
+n_un = int((adata.obs['gene'] == UNASSIGNED_LABEL).sum())
+n_other = int((adata.obs['gene'] == 'Other').sum())
+print(
+    f"Assignment: {adata.n_obs - n_amb - n_un - n_other} assigned, "
+    f"{n_amb} ambiguous, {n_un} unassigned, {n_other} not in the barcode table"
+)
 
 # Diagnostic check to ensure mapping worked
 print(f"--- MAPPING CHECK (Top Gene Counts) ---")
@@ -175,10 +194,27 @@ for target_gene in tqdm(gene_list, desc="Generating Labeled Scatters"):
     )
 
     # 5. LABELS & LINES
-    # Calculate thresholds based on the full control population (for accuracy)
-    # Note: We use the median of the *downsampled* controls for visualization alignment
-    h_thresh = df_ctrl['Expression'].median()
+    # The horizontal cut sits inside the control population. Use the mean rather
+    # than the median: expression is zero-inflated, so the control median is
+    # exactly 0 for most genes and the cut degenerates into "expression is
+    # exactly zero" with the dashed line drawn on the axis. Across the demo the
+    # two give the same net signal to within ~0.1 percentage points.
+    # full_ctrl_df is the whole control population; df_ctrl above has been
+    # downsampled to 2,000 rows for plotting. The cut and the baseline are both
+    # statistics of the population, so they must come from this frame, not the
+    # sample used to draw the grey points.
+    full_ctrl_df = plot_df[plot_df['Group'] == negative_ctrl]
+    if EXPRESSION_CUT == "median":
+        h_thresh = full_ctrl_df['Expression'].median()
+    else:
+        h_thresh = full_ctrl_df['Expression'].mean()
     v_thresh = 0.5
+
+    # Applying the same classification to control cells says what the knockdown
+    # percentage actually means: "66% knocked down" reads very differently next
+    # to a 0% control rate than next to a 16% one.
+    ctrl_kd = knockdown_fraction(full_ctrl_df, h_thresh, v_thresh)
+    tgt_kd = knockdown_fraction(df_target, h_thresh, v_thresh)
 
     plt.axvline(x=v_thresh, color='black', linestyle='--', alpha=0.5)
     plt.axhline(y=h_thresh, color='black', linestyle='--', alpha=0.5)
@@ -196,7 +232,12 @@ for target_gene in tqdm(gene_list, desc="Generating Labeled Scatters"):
     # Bottom-Left (Low Signal)
     plt.text(0.25, max(0, y_min) + (y_max*0.05), 'LOW SIGNAL', fontsize=10, fontweight='bold', color='grey', ha='center')
 
-    plt.title(f"Perturbation Validation: {target_gene}")
+    plt.title(
+        f"Perturbation Validation: {target_gene}\n"
+        f"knocked down: {tgt_kd:.0f}% of {target_gene} cells vs "
+        f"{ctrl_kd:.0f}% of controls (net {tgt_kd - ctrl_kd:+.0f}%)",
+        fontsize=10,
+    )
     plt.xlabel("Perturbation Score (PS)")
     plt.ylabel(f"Normalized {target_gene} Expression")
     plt.legend(loc='upper right', frameon=False)
